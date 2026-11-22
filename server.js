@@ -3,6 +3,7 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   Browsers,
+  makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
@@ -137,6 +138,7 @@ function backupSessionToSupabase() {
 async function connectToWhatsApp() {
   await restoreSessionFromSupabase();
 
+  const logger = pino({ level: "warn" });
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
@@ -144,8 +146,11 @@ async function connectToWhatsApp() {
 
   sock = makeWASocket({
     version,
-    auth: state,
-    logger: pino({ level: "warn" }),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    logger,
     printQRInTerminal: false,
     browser: Browsers.ubuntu("Chrome"),
     syncFullHistory: false,
@@ -171,8 +176,7 @@ async function connectToWhatsApp() {
 
   sock.ev.on("creds.update", async () => {
     await saveCreds();
-    if (sock?.user?.id) {
-      connectionStatus = "open";
+    if (sock?.user?.id && connectionStatus === "open") {
       currentQr = null;
     }
     backupSessionToSupabase();
@@ -195,43 +199,50 @@ async function connectToWhatsApp() {
         ? lastDisconnect.error.output?.statusCode
         : null;
 
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`[Baileys] Connection closed:`, lastDisconnect?.error?.message, `| Reconnecting:`, shouldReconnect);
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const shouldReconnect = !isLoggedOut;
+      console.log(`[Baileys] Connection closed:`, lastDisconnect?.error?.message, `(code: ${statusCode}) | Reconnecting:`, shouldReconnect);
 
       if (shouldReconnect) {
         connectionStatus = "reconnecting";
-        setTimeout(connectToWhatsApp, 3000);
+        // If conflict or replaced, wait slightly longer before reconnecting
+        const delay = statusCode === DisconnectReason.connectionReplaced ? 5000 : 3000;
+        setTimeout(connectToWhatsApp, delay);
       } else {
         connectionStatus = "logged_out";
-        console.log("[Baileys] Logged out. Clearing credentials...");
+        console.log("[Baileys] Explicitly logged out. Clearing credentials...");
         try {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true });
           await supabase.from("app_settings").delete().eq("id", "baileys_session");
         } catch {}
         setTimeout(connectToWhatsApp, 3000);
       }
-    } else if (connection === "open" || sock?.user?.id) {
+    } else if (connection === "open") {
       currentQr = null;
       connectionStatus = "open";
       console.log(`\n✅ [Baileys] WhatsApp connected successfully as: ${sock.user?.id || "Authorized User"}\n`);
       backupSessionToSupabase();
+    } else if (connection === "connecting") {
+      if (connectionStatus !== "open") {
+        connectionStatus = "connecting";
+      }
     }
   });
 }
 
 // 1. Health / Status check endpoint
 app.get("/status", (req, res) => {
-  const isConnected = connectionStatus === "open" || Boolean(sock?.user?.id);
+  const isConnected = connectionStatus === "open" && Boolean(sock?.user?.id);
   res.json({
     connected: isConnected,
     status: isConnected ? "open" : connectionStatus,
-    user: sock?.user || null,
+    user: isConnected ? sock?.user : null,
     hasQr: Boolean(currentQr) && !isConnected,
   });
 });
 
 app.get("/health", (req, res) => {
-  const isConnected = connectionStatus === "open" || Boolean(sock?.user?.id);
+  const isConnected = connectionStatus === "open" && Boolean(sock?.user?.id);
   res.json({ ok: true, status: isConnected ? "open" : connectionStatus });
 });
 
