@@ -341,7 +341,7 @@ app.post("/send", async (req, res) => {
 
   try {
     let targetJid = "";
-    if (phone.includes("@g.us")) {
+    if (phone.includes("@g.us") || phone.includes("@lid") || phone.includes("@s.whatsapp.net")) {
       targetJid = phone.trim();
     } else {
       const digits = phone.replace(/\D/g, "").slice(-10);
@@ -358,7 +358,8 @@ app.post("/send", async (req, res) => {
           error: `Phone number +91 ${digits} is not registered on WhatsApp.`,
         });
       }
-      targetJid = waCheck.jid;
+      // Modern WhatsApp MD contacts with privacy/LID enabled route via their LID
+      targetJid = waCheck.lid || waCheck.jid;
     }
 
     console.log(`[Baileys] Sending to ${targetJid}...`);
