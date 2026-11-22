@@ -2,6 +2,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  Browsers,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
@@ -55,6 +56,12 @@ app.use(express.json());
 let sock = null;
 let currentQr = null;
 let connectionStatus = "initializing"; // 'connecting' | 'open' | 'close' | 'waiting_for_scan'
+
+const recentMessages = [];
+function logMessageEvent(event, data) {
+  recentMessages.unshift({ time: new Date().toISOString(), event, data });
+  if (recentMessages.length > 50) recentMessages.pop();
+}
 
 // Restore session from Supabase on boot
 async function restoreSessionFromSupabase() {
@@ -126,8 +133,26 @@ async function connectToWhatsApp() {
     auth: state,
     logger: pino({ level: "warn" }),
     printQRInTerminal: false,
-    browser: ["Turnly Duty Bot", "Chrome", "1.0.0"],
+    browser: Browsers.ubuntu("Chrome"),
     syncFullHistory: false,
+  });
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    for (const m of messages) {
+      logMessageEvent("upsert", { id: m.key?.id, fromMe: m.key?.fromMe, remoteJid: m.key?.remoteJid, status: m.status });
+    }
+  });
+
+  sock.ev.on("messages.update", async (updates) => {
+    for (const u of updates) {
+      logMessageEvent("update", { id: u.key?.id, remoteJid: u.key?.remoteJid, update: u.update });
+    }
+  });
+
+  sock.ev.on("message-receipt.update", async (receipts) => {
+    for (const r of receipts) {
+      logMessageEvent("receipt", { key: r.key, receipt: r.receipt });
+    }
   });
 
   sock.ev.on("creds.update", async () => {
@@ -293,6 +318,10 @@ app.get("/check", async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
+});
+
+app.get("/receipts", (req, res) => {
+  res.json({ count: recentMessages.length, messages: recentMessages });
 });
 
 // 3. Message Dispatch Endpoint
