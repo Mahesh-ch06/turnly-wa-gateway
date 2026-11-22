@@ -157,13 +157,17 @@ async function connectToWhatsApp() {
 
   sock.ev.on("creds.update", async () => {
     await saveCreds();
+    if (sock?.user?.id) {
+      connectionStatus = "open";
+      currentQr = null;
+    }
     backupSessionToSupabase();
   });
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !sock?.user?.id) {
       currentQr = qr;
       connectionStatus = "waiting_for_scan";
       console.log("\n=================== SCAN WHATSAPP QR CODE ===================");
@@ -192,7 +196,7 @@ async function connectToWhatsApp() {
         } catch {}
         setTimeout(connectToWhatsApp, 3000);
       }
-    } else if (connection === "open") {
+    } else if (connection === "open" || sock?.user?.id) {
       currentQr = null;
       connectionStatus = "open";
       console.log(`\n✅ [Baileys] WhatsApp connected successfully as: ${sock.user?.id || "Authorized User"}\n`);
@@ -203,16 +207,18 @@ async function connectToWhatsApp() {
 
 // 1. Health / Status check endpoint
 app.get("/status", (req, res) => {
+  const isConnected = connectionStatus === "open" || Boolean(sock?.user?.id);
   res.json({
-    connected: connectionStatus === "open",
-    status: connectionStatus,
+    connected: isConnected,
+    status: isConnected ? "open" : connectionStatus,
     user: sock?.user || null,
-    hasQr: Boolean(currentQr),
+    hasQr: Boolean(currentQr) && !isConnected,
   });
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, status: connectionStatus });
+  const isConnected = connectionStatus === "open" || Boolean(sock?.user?.id);
+  res.json({ ok: true, status: isConnected ? "open" : connectionStatus });
 });
 
 // 2. Interactive Web QR Code endpoint
@@ -358,7 +364,8 @@ app.post("/send", async (req, res) => {
     return res.status(400).json({ success: false, error: "Missing 'phone' or 'text'" });
   }
 
-  if (connectionStatus !== "open" || !sock) {
+  const isConnected = connectionStatus === "open" || Boolean(sock?.user?.id);
+  if (!isConnected || !sock) {
     return res.status(503).json({
       success: false,
       error: `WhatsApp socket is not connected (current status: ${connectionStatus}). Please scan QR code at /qr first.`,
