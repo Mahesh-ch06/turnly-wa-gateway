@@ -276,6 +276,25 @@ app.get("/qr", async (req, res) => {
   }
 });
 
+// Check phone registration on WhatsApp
+app.get("/check", async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) return res.status(400).json({ error: "Missing phone parameter" });
+
+  if (connectionStatus !== "open" || !sock) {
+    return res.status(503).json({ error: "WhatsApp socket is not connected" });
+  }
+
+  try {
+    const digits = String(phone).replace(/\D/g, "").slice(-10);
+    const jid = `91${digits}@s.whatsapp.net`;
+    const result = await sock.onWhatsApp(jid);
+    return res.json({ query: phone, jid, result });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // 3. Message Dispatch Endpoint
 app.post("/send", async (req, res) => {
   const { phone, text } = req.body;
@@ -292,20 +311,34 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    let jid = "";
+    let targetJid = "";
     if (phone.includes("@g.us")) {
-      jid = phone.trim();
+      targetJid = phone.trim();
     } else {
       const digits = phone.replace(/\D/g, "").slice(-10);
       if (digits.length !== 10) {
         return res.status(400).json({ success: false, error: "Invalid 10-digit phone number" });
       }
-      jid = `91${digits}@s.whatsapp.net`;
+      const rawJid = `91${digits}@s.whatsapp.net`;
+      
+      // Verify with WhatsApp servers that the contact exists
+      const [waCheck] = await sock.onWhatsApp(rawJid);
+      if (!waCheck || !waCheck.exists) {
+        return res.status(404).json({
+          success: false,
+          error: `Phone number +91 ${digits} is not registered on WhatsApp.`,
+        });
+      }
+      targetJid = waCheck.jid;
     }
 
-    const sent = await sock.sendMessage(jid, { text: text.trim() });
+    console.log(`[Baileys] Sending to ${targetJid}...`);
+    const sent = await sock.sendMessage(targetJid, { text: text.trim() });
+    console.log(`[Baileys] Sent message ${sent?.key?.id} to ${targetJid}`);
+    
     return res.json({
       success: true,
+      targetJid,
       messageId: sent?.key?.id,
       timestamp: sent?.messageTimestamp,
     });
