@@ -57,6 +57,20 @@ let sock = null;
 let currentQr = null;
 let connectionStatus = "initializing"; // 'connecting' | 'open' | 'close' | 'waiting_for_scan'
 
+const runtimeLogs = [];
+const origLog = console.log;
+const origErr = console.error;
+console.log = (...args) => {
+  origLog(...args);
+  runtimeLogs.unshift({ time: new Date().toISOString(), type: "log", msg: args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ") });
+  if (runtimeLogs.length > 100) runtimeLogs.pop();
+};
+console.error = (...args) => {
+  origErr(...args);
+  runtimeLogs.unshift({ time: new Date().toISOString(), type: "error", msg: args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ") });
+  if (runtimeLogs.length > 100) runtimeLogs.pop();
+};
+
 const recentMessages = [];
 function logMessageEvent(event, data) {
   recentMessages.unshift({ time: new Date().toISOString(), event, data });
@@ -356,6 +370,10 @@ app.get("/receipts", (req, res) => {
   res.json({ count: recentMessages.length, messages: recentMessages });
 });
 
+app.get("/logs", (req, res) => {
+  res.json({ count: runtimeLogs.length, logs: runtimeLogs });
+});
+
 // 3. Message Dispatch Endpoint
 app.post("/send", async (req, res) => {
   const { phone, text } = req.body;
@@ -391,13 +409,12 @@ app.post("/send", async (req, res) => {
           error: `Phone number +91 ${digits} is not registered on WhatsApp.`,
         });
       }
-      // Modern WhatsApp MD contacts with privacy/LID enabled route via their LID
-      targetJid = waCheck.lid || waCheck.jid;
+      targetJid = waCheck.jid || rawJid;
     }
 
     console.log(`[Baileys] Sending to ${targetJid}...`);
     const sent = await sock.sendMessage(targetJid, { text: text.trim() });
-    console.log(`[Baileys] Sent message ${sent?.key?.id} to ${targetJid}`);
+    console.log(`[Baileys] Sent message details:`, JSON.stringify(sent));
     
     return res.json({
       success: true,
