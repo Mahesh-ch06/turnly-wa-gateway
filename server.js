@@ -235,7 +235,10 @@ app.get("/qr", async (req, res) => {
             <span class="badge">Connected</span>
             <h2>WhatsApp Linked!</h2>
             <p style="color: #94a3b8; font-size: 0.95rem;">Turnly WhatsApp Gateway is live and sending notifications to all flatmates directly.</p>
-            <p style="font-size: 0.85rem; color: #64748b; margin-top: 1.5rem;">User ID: ${sock?.user?.id || "Active"}</p>
+            <p style="font-size: 0.85rem; color: #64748b; margin-top: 1rem;">Connected Account: ${sock?.user?.id || "Active"}</p>
+            <div style="margin-top: 1.5rem;">
+              <a href="/relink" onclick="return confirm('Do you want to log out this WhatsApp account and scan a new QR code?');" style="display: inline-block; padding: 0.65rem 1.25rem; background: #e11d48; color: white; border-radius: 0.5rem; text-decoration: none; font-size: 0.9rem; font-weight: 600;">Log Out & Scan New QR Code</a>
+            </div>
           </div>
         </body>
       </html>
@@ -298,6 +301,29 @@ app.get("/qr", async (req, res) => {
     `);
   } catch (err) {
     res.status(500).send("Error rendering QR code");
+  }
+});
+
+// Re-link endpoint: Clears session and forces new QR code generation
+app.get("/relink", async (req, res) => {
+  try {
+    console.log("[Baileys] Manual relink requested. Clearing session and regenerating QR code...");
+    connectionStatus = "waiting_for_scan";
+    currentQr = null;
+    if (sock) {
+      try {
+        sock.end(undefined);
+      } catch {}
+      sock = null;
+    }
+    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    await supabase.from("app_settings").delete().eq("id", "baileys_session");
+    setTimeout(() => {
+      connectToWhatsApp().catch(console.error);
+    }, 1000);
+    return res.redirect("/qr");
+  } catch (err) {
+    return res.status(500).send("Error clearing session: " + err.message);
   }
 });
 
