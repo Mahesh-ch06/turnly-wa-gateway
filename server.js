@@ -393,7 +393,20 @@ app.post("/send", async (req, res) => {
     return res.status(400).json({ success: false, error: "Missing 'phone' or 'text'" });
   }
 
-  const isConnected = connectionStatus === "open" || Boolean(sock?.user?.id);
+  // If socket is currently connecting or reconnecting, wait up to 20s for connection to reach 'open'
+  if ((connectionStatus === "connecting" || connectionStatus === "reconnecting") && !sock?.user?.id) {
+    console.log(`[Baileys] Socket is currently '${connectionStatus}'. Waiting up to 20s for connection to open...`);
+    const startWait = Date.now();
+    while (Date.now() - startWait < 20000) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (connectionStatus === "open" && sock?.user?.id) {
+        console.log(`[Baileys] Socket reached 'open' state after ${Date.now() - startWait}ms.`);
+        break;
+      }
+    }
+  }
+
+  const isConnected = connectionStatus === "open" && Boolean(sock?.user?.id);
   if (!isConnected || !sock) {
     return res.status(503).json({
       success: false,
@@ -440,6 +453,83 @@ app.post("/send", async (req, res) => {
       error: err.message || "Failed to dispatch message via Baileys",
     });
   }
+});
+
+// 4. Background Self-Keep-Alive & Turnly Notification Scheduler
+const GATEWAY_PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || "https://turnly-wa-gateway.onrender.com";
+const APP_CRON_URL = process.env.APP_CRON_URL || "https://duty-buddy-rotations-main.vercel.app/api/cron/notifications";
+
+let lastExecutedSlot = "";
+
+// Keep Render awake 24/7 by pinging itself every 10 minutes
+setInterval(async () => {
+  try {
+    const res = await fetch(`${GATEWAY_PUBLIC_URL.replace(/\/$/, "")}/health`);
+    if (res.ok) {
+      console.log(`[Keep-Alive] Pinged ${GATEWAY_PUBLIC_URL}/health successfully.`);
+    }
+  } catch (err) {
+    console.warn(`[Keep-Alive] Warning pinging self:`, err.message);
+  }
+}, 10 * 60 * 1000);
+
+// Scheduled notification trigger: Runs every minute and checks Asia/Kolkata (IST) time
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const istDateString = now.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // YYYY-MM-DD
+    const timeParts = now.toLocaleTimeString("en-US", { timeZone: "Asia/Kolkata", hour12: false, hour: "2-digit", minute: "2-digit" }).split(":");
+    const istHour = parseInt(timeParts[0], 10);
+    const istMinute = parseInt(timeParts[1], 10);
+
+    const slotKey = `${istDateString}-${istHour}`;
+
+    // Target alert windows:
+    // 1. Morning 6:00 AM IST (istHour === 6)
+    // 2. Evening 6:00 PM to 11:00 PM IST (istHour >= 18 && istHour <= 23)
+    const isTargetHour = (istHour === 6 || (istHour >= 18 && istHour <= 23));
+
+    // Fire within the first 5 minutes of the hour (e.g. 06:00, 18:00, etc.) once per slot
+    if (isTargetHour && istMinute < 5 && lastExecutedSlot !== slotKey) {
+      lastExecutedSlot = slotKey;
+      console.log(`[Scheduler] ⏰ Triggering automated Turnly notifications for slot: ${slotKey} (${istHour}:${istMinute.toString().padStart(2, "0")} IST)...`);
+
+      // If socket is reconnecting, give it up to 25s before triggering
+      if (connectionStatus !== "open") {
+        console.log(`[Scheduler] Waiting for WhatsApp socket to open before cron trigger...`);
+        for (let i = 0; i < 25; i++) {
+          if (connectionStatus === "open") break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+
+      const cronUrl = `${APP_CRON_URL}?hour=${istHour}`;
+      const res = await fetch(cronUrl, {
+        method: "GET",
+        headers: { "User-Agent": "Turnly-Scheduler/1.0" },
+      });
+      const data = await res.json().catch(() => ({}));
+      console.log(`[Scheduler] Notification dispatch result for slot ${slotKey}:`, JSON.stringify(data));
+    }
+  } catch (err) {
+    console.error(`[Scheduler] Error in automated cron check:`, err.message);
+  }
+}, 60 * 1000);
+
+// Scheduler status endpoint
+app.get("/scheduler", (req, res) => {
+  const now = new Date();
+  const istTime = now.toLocaleTimeString("en-US", { timeZone: "Asia/Kolkata" });
+  const istDate = now.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  res.json({
+    status: "active",
+    istTime,
+    istDate,
+    lastExecutedSlot,
+    targetWindows: "06:00 AM (Morning Roster) & 18:00–23:00 (Hourly Evening Reminders)",
+    gatewayUrl: GATEWAY_PUBLIC_URL,
+    cronUrl: APP_CRON_URL,
+  });
 });
 
 // Start express server and Baileys
